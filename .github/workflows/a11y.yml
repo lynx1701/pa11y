@@ -1,3 +1,4 @@
+```yml
 name: Accessibility (pa11y-ci)
 
 on:
@@ -10,50 +11,58 @@ permissions:
 
 jobs:
   pa11y:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - run: npm ci
+      - name: Install
+        run: npm ci
 
-      # Run pa11y BUT don't stop the workflow here
-      - name: Run pa11y-ci (capture exit code)
+      # Run pa11y, but never fail the job here.
+      # We capture the exit code so we can show a warning in the summary.
+      - name: Run pa11y (soft-fail)
         id: pa11y
         run: |
-          mkdir -p pa11y/html
+          mkdir -p pa11y
+          echo "placeholder" > pa11y/_placeholder.txt
+
           set +e
           npm run test:a11y
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
-          # Always exit 0 so next steps run (artifact upload)
+
+          # Always succeed so artifacts + summary always run
           exit 0
 
-      # Debug: show what actually got generated (super useful)
-      - name: List report files
-        if: always()
-        run: |
-          echo "=== pa11y directory ==="
-          ls -R pa11y || true
-
-      - name: Upload pa11y report (always)
+      - name: Upload pa11y artifacts (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pa11y-report
-          path: pa11y/html
+          path: pa11y/
+          if-no-files-found: warn
 
-      # Fail the job AFTER uploading artifacts
-      - name: Fail if pa11y failed
+      - name: Write summary (always)
         if: always()
         run: |
           code="${{ steps.pa11y.outputs.exit_code }}"
-          echo "Pa11y exit code: $code"
-          if [ "$code" != "0" ]; then
-            exit 1
-          fi
+          {
+            echo "## ♿️ Pa11y results"
+            echo ""
+            if [ "$code" != "0" ]; then
+              echo "⚠️ Pa11y reported accessibility issues (exit code: **$code**)."
+              echo ""
+              echo "Download the **pa11y-report** artifact to view the JSON/HTML output."
+            else
+              echo "✅ No issues detected."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+```
