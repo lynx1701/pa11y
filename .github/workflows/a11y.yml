@@ -46,7 +46,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pa11y-report
-          path: pa11y/
+          path: pa11y/html
 
       # Fail the job AFTER uploading artifacts
       - name: Fail if pa11y failed
