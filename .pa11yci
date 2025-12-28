@@ -1,30 +1,22 @@
 {
+  "urls": [
+    "http://mobi.meuhedet.co.il/"
+  ],
   "defaults": {
-    "standard": "WCAG2AA",
-    "timeout": 30000,
-    "chromeLaunchConfig": {
-      "args": [
-        "--no-sandbox",
-        "--disable-dev-shm-usage"
-      ]
-    },
     "reporters": [
       "cli",
       [
         "json",
         {
-          "fileName": "./pa11y/pa11y-ci-results.json"
+          "fileName": "pa11y/pa11y-results.json"
         }
       ],
       [
         "pa11y-ci-reporter-html",
         {
-          "destination": "./pa11y/report-html"
+          "destination": "pa11y/html"
         }
       ]
     ]
-  },
-  "urls": [
-    "http://mobi.meuhedet.co.il"
-  ]
+  }
 }
