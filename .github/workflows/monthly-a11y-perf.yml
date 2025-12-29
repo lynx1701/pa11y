@@ -5,15 +5,20 @@ on:
     # Runs at 06:00 UTC on the 1st of every month
     - cron: "0 6 1 * *"
   workflow_dispatch:
-    inputs:
-      sitemap_url:
-        description: "Sitemap URL (xml or xml.gz). Leave empty to use env.SITEMAP_URL"
-        required: false
-        default: ""
-      max_urls:
-        description: "Optional cap for URLs (0 = no cap)"
-        required: false
-        default: "0"
+  inputs:
+    sitemap_url:
+      description: "Sitemap URL (xml or xml.gz). Used if single_url is empty. Leave empty to use env.SITEMAP_URL"
+      required: false
+      default: ""
+    single_url:
+      description: "Single URL to audit (overrides sitemap_url when provided)"
+      required: false
+      default: ""
+    max_urls:
+      description: "Optional cap for sitemap-based runs (0 = no cap). Ignored when single_url is provided."
+      required: false
+      default: "0"
+
 
 permissions:
   contents: read
@@ -56,21 +61,48 @@ jobs:
           SITEMAP="${{ inputs.sitemap_url }}"
           if [ -z "$SITEMAP" ]; then SITEMAP="${SITEMAP_URL}"; fi
 
+          SINGLE="${{ inputs.single_url }}"
+          # allow env override too (useful for ad-hoc debugging)
+          if [ -z "$SINGLE" ] && [ -n "${SINGLE_URL:-}" ]; then SINGLE="${SINGLE_URL}"; fi
+
           MAX="${{ inputs.max_urls }}"
           if [ -z "$MAX" ]; then MAX="${MAX_URLS}"; fi
 
           echo "sitemap=$SITEMAP" >> $GITHUB_OUTPUT
+          echo "single_url=$SINGLE" >> $GITHUB_OUTPUT
           echo "max_urls=$MAX" >> $GITHUB_OUTPUT
 
-      - name: Extract URLs from sitemap -> urls.txt
+
+      - name: Build URL list (sitemap or single url) -> urls.txt
         run: |
           node <<'NODE'
           const fs = require("fs");
           const zlib = require("zlib");
           const { XMLParser } = require("fast-xml-parser");
 
-          const sitemapUrl = process.env.SITEMAP_URL_EFFECTIVE;
+          const sitemapUrl = process.env.SITEMAP_URL_EFFECTIVE || "";
+          const singleUrl = (process.env.SINGLE_URL_EFFECTIVE || "").trim();
           const maxUrls = Number(process.env.MAX_URLS_EFFECTIVE || "0");
+
+          function assertHttpUrl(u) {
+            try {
+              const x = new URL(u);
+              if (x.protocol !== "http:" && x.protocol !== "https:") throw new Error("Only http/https allowed");
+            } catch {
+              throw new Error(`Invalid URL: ${u}`);
+            }
+          }
+
+          // If a single URL was provided, just write it and exit.
+          if (singleUrl) {
+            assertHttpUrl(singleUrl);
+            fs.writeFileSync("urls.txt", singleUrl + "\n", "utf8");
+            fs.writeFileSync("urls.json", JSON.stringify([singleUrl], null, 2), "utf8");
+            console.log(`Using single URL: ${singleUrl}`);
+            process.exit(0);
+          }
+
+          if (!sitemapUrl) throw new Error("No single_url provided and no sitemap URL available.");
 
           const parser = new XMLParser({ ignoreAttributes: false, allowBooleanAttributes: true });
 
@@ -113,11 +145,15 @@ jobs:
           }
 
           (async () => {
+            assertHttpUrl(sitemapUrl);
+
             const seen = new Set();
             const out = [];
 
             async function addUrls(urls) {
               for (const u of urls) {
+                if (!u) continue;
+                try { assertHttpUrl(u); } catch { continue; }
                 if (!seen.has(u)) {
                   seen.add(u);
                   out.push(u);
@@ -140,10 +176,12 @@ jobs:
               }
             }
 
+            if (out.length === 0) throw new Error("Sitemap produced 0 valid URLs.");
+
             fs.writeFileSync("urls.txt", out.join("\n") + "\n", "utf8");
             fs.writeFileSync("urls.json", JSON.stringify(out, null, 2), "utf8");
 
-            console.log(`Extracted ${out.length} URLs`);
+            console.log(`Extracted ${out.length} URLs from sitemap`);
           })().catch(err => {
             console.error(err);
             process.exit(1);
@@ -151,7 +189,9 @@ jobs:
           NODE
         env:
           SITEMAP_URL_EFFECTIVE: ${{ steps.vars.outputs.sitemap }}
+          SINGLE_URL_EFFECTIVE: ${{ steps.vars.outputs.single_url }}
           MAX_URLS_EFFECTIVE: ${{ steps.vars.outputs.max_urls }}
+
 
       - name: Prepare report folders
         run: |
