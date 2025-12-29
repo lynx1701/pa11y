@@ -199,40 +199,36 @@ jobs:
         env:
           CHROME_FLAGS: ${{ env.CHROME_FLAGS }}
 
-      - name: Run Pa11y (logs in Actions + JSON + HTML outputs)
+      - name: Run Pa11y (sandbox fix + live logs)
         shell: bash
         run: |
           set +e
-          set -o pipefail
+          export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+          export PUPPETEER_EXECUTABLE_PATH=$(which chromium || which google-chrome || which chromium-browser || true)
 
+          echo "Chromium path: $PUPPETEER_EXECUTABLE_PATH"
           echo "== Pa11y diagnostics =="
           node -v
           npx --yes pa11y-ci --version || true
-          echo "URLs count: $(wc -l < urls.txt | tr -d ' ')"
-          echo "First 5 URLs:"
-          head -n 5 urls.txt || true
-          echo "Pa11y config:"
-          cat .pa11yci.json || true
           echo "======================="
 
-          echo ""
-          echo "== Running Pa11y (single run; reporters write files) =="
-          npx pa11y-ci -c .pa11yci.json --threshold 999999 2>&1 | tee reports/pa11y/pa11y-run.log
+          # In case no Chromium is installed, install one manually
+          if [ -z "$PUPPETEER_EXECUTABLE_PATH" ]; then
+            echo "Installing Chromium..."
+            sudo apt-get update -y
+            sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
+            export PUPPETEER_EXECUTABLE_PATH=$(which chromium || which chromium-browser)
+            echo "Chromium installed at $PUPPETEER_EXECUTABLE_PATH"
+          fi
+
+          echo "== Running Pa11y =="
+          npx pa11y-ci -c .pa11yci.json --no-sandbox --threshold 999999 2>&1 | tee reports/pa11y/pa11y-run.log
           PA11Y_EXIT=${PIPESTATUS[0]}
-          echo "$PA11Y_EXIT" > reports/pa11y/pa11y.exitcode
           echo "Pa11y exit code: $PA11Y_EXIT"
 
           echo ""
-          echo "== Pa11y outputs check =="
-          echo "JSON:"
-          ls -la reports/pa11y/pa11y-report.json || true
-          if [ -f reports/pa11y/pa11y-report.json ]; then
-            echo "JSON size: $(wc -c < reports/pa11y/pa11y-report.json | tr -d ' ') bytes"
-          fi
-
-          echo ""
-          echo "HTML folder:"
-          ls -la reports/pa11y/html || true
+          echo "Outputs:"
+          ls -R reports/pa11y || true
 
           exit 0
 
