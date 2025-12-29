@@ -5,20 +5,19 @@ on:
     # Runs at 06:00 UTC on the 1st of every month
     - cron: "0 6 1 * *"
   workflow_dispatch:
-  inputs:
-    sitemap_url:
-      description: "Sitemap URL (xml or xml.gz). Used if single_url is empty. Leave empty to use env.SITEMAP_URL"
-      required: false
-      default: ""
-    single_url:
-      description: "Single URL to audit (overrides sitemap_url when provided)"
-      required: false
-      default: ""
-    max_urls:
-      description: "Optional cap for sitemap-based runs (0 = no cap). Ignored when single_url is provided."
-      required: false
-      default: "0"
-
+    inputs:
+      sitemap_url:
+        description: "Sitemap URL (xml or xml.gz). Used if single_url is empty. Leave empty to use env.SITEMAP_URL"
+        required: false
+        default: ""
+      single_url:
+        description: "Single URL to audit (overrides sitemap_url when provided)"
+        required: false
+        default: ""
+      max_urls:
+        description: "Optional cap for sitemap-based runs (0 = no cap). Ignored when single_url is provided."
+        required: false
+        default: "0"
 
 permissions:
   contents: read
@@ -71,7 +70,6 @@ jobs:
           echo "sitemap=$SITEMAP" >> $GITHUB_OUTPUT
           echo "single_url=$SINGLE" >> $GITHUB_OUTPUT
           echo "max_urls=$MAX" >> $GITHUB_OUTPUT
-
 
       - name: Build URL list (sitemap or single url) -> urls.txt
         run: |
@@ -191,7 +189,6 @@ jobs:
           SITEMAP_URL_EFFECTIVE: ${{ steps.vars.outputs.sitemap }}
           SINGLE_URL_EFFECTIVE: ${{ steps.vars.outputs.single_url }}
           MAX_URLS_EFFECTIVE: ${{ steps.vars.outputs.max_urls }}
-
 
       - name: Prepare report folders
         run: |

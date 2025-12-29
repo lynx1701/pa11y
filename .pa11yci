@@ -1,6 +1,6 @@
 {
   "urls": [
-    "http://mobi.meuhedet.co.il/"
+    "*"
   ],
   "defaults": {
     "timeout": 30000,
