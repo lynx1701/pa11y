@@ -1,0 +1,326 @@
+name: Monthly A11y + Lighthouse Reports
+
+on:
+  schedule:
+    # Runs at 06:00 UTC on the 1st of every month
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+    inputs:
+      sitemap_url:
+        description: "Sitemap URL (xml or xml.gz). Leave empty to use env.SITEMAP_URL"
+        required: false
+        default: ""
+      max_urls:
+        description: "Optional cap for URLs (0 = no cap)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monthly-a11y-perf
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    env:
+      # Set your default sitemap here (can be overridden by workflow_dispatch input)
+      SITEMAP_URL: "https://example.com/sitemap.xml"
+      # Optional global cap (can be overridden by workflow_dispatch input)
+      MAX_URLS: "0"
+
+      # Puppeteer/Chrome sandbox flags (fixes the common "No usable sandbox" crash on GitHub runners)
+      CHROME_FLAGS: "--no-sandbox --disable-setuid-sandbox"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install tooling (pa11y + lhci + xml parser)
+        run: |
+          npm ci || true
+          npm install --no-save pa11y-ci pa11y-ci-reporter-html @lhci/cli fast-xml-parser
+
+      - name: Resolve inputs/env
+        id: vars
+        run: |
+          SITEMAP="${{ inputs.sitemap_url }}"
+          if [ -z "$SITEMAP" ]; then SITEMAP="${SITEMAP_URL}"; fi
+
+          MAX="${{ inputs.max_urls }}"
+          if [ -z "$MAX" ]; then MAX="${MAX_URLS}"; fi
+
+          echo "sitemap=$SITEMAP" >> $GITHUB_OUTPUT
+          echo "max_urls=$MAX" >> $GITHUB_OUTPUT
+
+      - name: Extract URLs from sitemap -> urls.txt
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const zlib = require("zlib");
+          const { XMLParser } = require("fast-xml-parser");
+
+          const sitemapUrl = process.env.SITEMAP_URL_EFFECTIVE;
+          const maxUrls = Number(process.env.MAX_URLS_EFFECTIVE || "0");
+
+          const parser = new XMLParser({ ignoreAttributes: false, allowBooleanAttributes: true });
+
+          async function fetchTextOrGunzip(url) {
+            const res = await fetch(url, { redirect: "follow" });
+            if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (url.endsWith(".gz")) return zlib.gunzipSync(buf).toString("utf8");
+            return buf.toString("utf8");
+          }
+
+          function toArray(x) {
+            if (!x) return [];
+            return Array.isArray(x) ? x : [x];
+          }
+
+          async function extractFromUrl(url) {
+            const xml = await fetchTextOrGunzip(url);
+            const data = parser.parse(xml);
+
+            // urlset
+            if (data.urlset && data.urlset.url) {
+              const urls = toArray(data.urlset.url)
+                .map(u => u.loc)
+                .filter(Boolean)
+                .map(String);
+              return { type: "urlset", urls };
+            }
+
+            // sitemapindex
+            if (data.sitemapindex && data.sitemapindex.sitemap) {
+              const sitemaps = toArray(data.sitemapindex.sitemap)
+                .map(s => s.loc)
+                .filter(Boolean)
+                .map(String);
+              return { type: "index", sitemaps };
+            }
+
+            throw new Error(`Unrecognized sitemap format at ${url}`);
+          }
+
+          (async () => {
+            const seen = new Set();
+            const out = [];
+
+            async function addUrls(urls) {
+              for (const u of urls) {
+                if (!seen.has(u)) {
+                  seen.add(u);
+                  out.push(u);
+                  if (maxUrls > 0 && out.length >= maxUrls) return false;
+                }
+              }
+              return true;
+            }
+
+            const root = await extractFromUrl(sitemapUrl);
+
+            if (root.type === "urlset") {
+              await addUrls(root.urls);
+            } else {
+              for (const sm of root.sitemaps) {
+                const child = await extractFromUrl(sm);
+                if (child.type !== "urlset") continue;
+                const ok = await addUrls(child.urls);
+                if (!ok) break;
+              }
+            }
+
+            fs.writeFileSync("urls.txt", out.join("\n") + "\n", "utf8");
+            fs.writeFileSync("urls.json", JSON.stringify(out, null, 2), "utf8");
+
+            console.log(`Extracted ${out.length} URLs`);
+          })().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          NODE
+        env:
+          SITEMAP_URL_EFFECTIVE: ${{ steps.vars.outputs.sitemap }}
+          MAX_URLS_EFFECTIVE: ${{ steps.vars.outputs.max_urls }}
+
+      - name: Prepare report folders
+        run: |
+          mkdir -p reports/pa11y
+          mkdir -p reports/lighthouse
+          mkdir -p reports/meta
+
+      - name: Create Pa11y config from urls.txt
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          const urls = fs.readFileSync("urls.txt","utf8")
+            .split("\n").map(s=>s.trim()).filter(Boolean);
+
+          const cfg = {
+            defaults: {
+              timeout: 60000,
+              // Used by pa11y (puppeteer) under the hood
+              chromeLaunchConfig: {
+                args: (process.env.CHROME_FLAGS || "").split(" ").filter(Boolean),
+              },
+            },
+            urls
+          };
+
+          fs.writeFileSync(".pa11yci.json", JSON.stringify(cfg, null, 2), "utf8");
+          console.log(`Pa11y config created with ${urls.length} URLs`);
+          NODE
+        env:
+          CHROME_FLAGS: ${{ env.CHROME_FLAGS }}
+
+      - name: Run Pa11y (JSON)
+        continue-on-error: true
+        run: |
+          npx pa11y-ci -c .pa11yci.json --reporter json > reports/pa11y/pa11y-report.json
+
+      - name: Run Pa11y (HTML)
+        continue-on-error: true
+        run: |
+          npx pa11y-ci -c .pa11yci.json --reporter pa11y-ci-reporter-html > reports/pa11y/pa11y-report.html
+
+      - name: Create Lighthouse CI config from urls.txt
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+
+          const urls = fs.readFileSync("urls.txt","utf8")
+            .split("\n").map(s=>s.trim()).filter(Boolean);
+
+          const chromeFlags = (process.env.CHROME_FLAGS || "").split(" ").filter(Boolean);
+
+          const cfg = {
+            ci: {
+              collect: {
+                url: urls,
+                numberOfRuns: 1,
+                settings: {
+                  chromeFlags
+                }
+              },
+              // This creates a nice folder of HTML reports + a manifest
+              upload: {
+                target: "filesystem",
+                outputDir: "reports/lighthouse"
+              }
+            }
+          };
+
+          fs.writeFileSync("lighthouserc.json", JSON.stringify(cfg, null, 2), "utf8");
+          console.log(`LHCI config created with ${urls.length} URLs`);
+          NODE
+        env:
+          CHROME_FLAGS: ${{ env.CHROME_FLAGS }}
+
+      - name: Run Lighthouse CI (HTML + JSON artifacts)
+        continue-on-error: true
+        run: |
+          # autorun = collect + upload (filesystem)
+          npx lhci autorun --config=./lighthouserc.json || true
+
+          # LHCI also generates raw json/html artifacts in .lighthouseci; keep them too if present
+          if [ -d ".lighthouseci" ]; then
+            mkdir -p reports/lighthouse/raw
+            cp -R .lighthouseci/* reports/lighthouse/raw/ || true
+          fi
+
+      - name: Build a top-level index.html for easy viewing
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          function listHtml(dir) {
+            if (!fs.existsSync(dir)) return [];
+            return fs.readdirSync(dir)
+              .filter(f => f.toLowerCase().endsWith(".html"))
+              .map(f => path.join(dir, f).replace(/\\/g, "/"));
+          }
+
+          const pa11yHtml = "pa11y/pa11y-report.html";
+          const lhciHtml = listHtml("reports/lighthouse")
+            .filter(p => !p.endsWith("index.html"))
+            .map(p => p.replace(/^reports\//, ""));
+
+          const html = `<!doctype html>
+          <html>
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <title>Monthly Reports</title>
+              <style>
+                body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; }
+                h1 { margin: 0 0 12px; }
+                .box { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin: 16px 0; }
+                a { text-decoration: none; }
+                a:hover { text-decoration: underline; }
+                ul { margin: 8px 0 0 18px; }
+                code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+              </style>
+            </head>
+            <body>
+              <h1>Monthly Accessibility + Performance Reports</h1>
+
+              <div class="box">
+                <h2>Pa11y</h2>
+                <ul>
+                  <li><a href="${pa11yHtml}">HTML report</a></li>
+                  <li><a href="pa11y/pa11y-report.json">JSON report</a></li>
+                </ul>
+              </div>
+
+              <div class="box">
+                <h2>Lighthouse CI</h2>
+                <ul>
+                  <li><a href="lighthouse/manifest.json">manifest.json</a> (maps URLs to report files)</li>
+                  ${lhciHtml.length ? lhciHtml.map(f => `<li><a href="${f}">${f}</a></li>`).join("\n") : "<li>No HTML reports found (LHCI may have failed).</li>"}
+                </ul>
+              </div>
+
+              <div class="box">
+                <h2>Inputs</h2>
+                <ul>
+                  <li><code>urls.txt</code> and <code>urls.json</code> are included in the zip root.</li>
+                </ul>
+              </div>
+            </body>
+          </html>`;
+
+          fs.writeFileSync("reports/index.html", html, "utf8");
+          NODE
+
+      - name: Copy URL lists into reports for convenience
+        run: |
+          cp urls.txt reports/meta/urls.txt
+          cp urls.json reports/meta/urls.json
+
+      - name: Zip everything into a single file
+        if: always()
+        run: |
+          TS="$(date -u +'%Y-%m')"
+          ZIP="monthly-reports-${TS}.zip"
+          zip -r "$ZIP" reports > /dev/null
+          echo "ZIP_NAME=$ZIP" >> $GITHUB_ENV
+
+      - name: Upload artifact (single zip)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-a11y-lighthouse-reports
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
