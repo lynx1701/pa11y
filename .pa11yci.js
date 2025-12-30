@@ -1,6 +1,6 @@
 function parseUrls(value) {
   return (value || "")
-    .split(/\r?\n/)
+    .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 }
