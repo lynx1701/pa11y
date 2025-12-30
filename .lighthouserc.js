@@ -1,6 +1,6 @@
 function splitUrls(str) {
   return (str || "")
-    .split(",")
+    .split(/[\r\n,]+/)
     .map((s) => s.trim())
     .filter(Boolean);
 }
