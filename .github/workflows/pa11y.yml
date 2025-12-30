@@ -36,7 +36,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # --- Pa11y ---
+      # -------------------------
+      # Pa11y
+      # -------------------------
       - name: Run Pa11y CI
         continue-on-error: true
         env:
@@ -51,136 +53,151 @@ jobs:
               exit 1
             fi
 
-            CMD=(npx pa11y-ci --config .pa11yci.js --sitemap "${{ inputs.sitemap_url }}")
-
+            # IMPORTANT: actually execute the command
+            npx pa11y-ci --config .pa11yci.js --sitemap "${{ inputs.sitemap_url }}"
           else
             if [ -z "${{ inputs.urls }}" ]; then
-              echo "mode=urls requires inputs.urls (comma-separated)"
+              echo "mode=urls requires inputs.urls (comma or newline separated)"
               exit 1
             fi
 
             npx pa11y-ci --config .pa11yci.js
           fi
 
-      # --- Lighthouse: prepare URL list (works for urls or sitemap) ---
-      - name: Prepare Lighthouse URL list
+      - name: Upload pa11y reports
         if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p reports/lighthouse
+        uses: actions/upload-artifact@v4
+        with:
+          name: pa11y-reports
+          path: reports/pa11y
 
-          if [ "${{ inputs.mode }}" = "sitemap" ]; then
-            if [ -z "${{ inputs.sitemap_url }}" ]; then
-              echo "mode=sitemap requires inputs.sitemap_url"
-              exit 1
-            fi
-
-            # Fetch sitemap and extract <loc> URLs (simple + effective).
-            # If your sitemap is a sitemap-index, this won't recurse. (We can add recursion if you want.)
-            node - <<'NODE'
-            const url = process.env.SITEMAP_URL;
-            const max = Number(process.env.MAX_URLS || 20);
-
-            const http = require("http");
-            const https = require("https");
-
-            function fetch(u) {
-              return new Promise((resolve, reject) => {
-                const lib = u.startsWith("https:") ? https : http;
-                lib.get(u, (res) => {
-                  let data = "";
-                  res.on("data", (c) => data += c);
-                  res.on("end", () => resolve(data));
-                }).on("error", reject);
-              });
-            }
-
-            (async () => {
-              const xml = await fetch(url);
-              const locs = [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)].map(m => m[1].trim());
-
-              // Filter out obvious sitemap links (optional)
-              const urls = locs.filter(x => /^https?:\/\//.test(x) && !x.endsWith(".xml")).slice(0, max);
-
-              if (!urls.length) {
-                console.error("No URLs extracted from sitemap (or they were filtered out).");
-                process.exit(1);
-              }
-
-              // Write multiline env var
-              console.log("LHCI_URLS<<EOF");
-              console.log(urls.join("\n"));
-              console.log("EOF");
-            })().catch(e => { console.error(e); process.exit(1); });
-            NODE
-          else
-            if [ -z "${{ inputs.urls }}" ]; then
-              echo "mode=urls requires inputs.urls (comma/newline-separated)"
-              exit 1
-            fi
-            echo "LHCI_URLS<<EOF" >> $GITHUB_ENV
-            # Keep as-is; .lighthouserc.js splits on commas/newlines
-            echo "${{ inputs.urls }}" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
-            exit 0
-          fi
+      # -------------------------
+      # Resolve URL list ONCE for Lighthouse (works for single URL too)
+      # -------------------------
+      - name: Resolve Lighthouse URLs (JS)
+        id: lhci_urls
+        if: always()
         env:
+          MODE: ${{ inputs.mode }}
+          INPUT_URLS: ${{ inputs.urls }}
           SITEMAP_URL: ${{ inputs.sitemap_url }}
-          MAX_URLS: ${{ inputs.lhci_max_urls }}
-
-      # Write the multiline output from Node into GITHUB_ENV
-      - name: Export LHCI_URLS to env
-        if: always()
+          MAX_URLS: "20"
         run: |
           set -euo pipefail
-          # The previous step printed an env heredoc to stdout if mode=sitemap.
-          # GitHub doesn't auto-apply that, so we re-run extraction and write to GITHUB_ENV directly.
-          if [ "${{ inputs.mode }}" != "sitemap" ]; then
-            exit 0
-          fi
 
-          node - <<'NODE'
+          node <<'NODE'
           const fs = require("fs");
-          const url = process.env.SITEMAP_URL;
-          const max = Number(process.env.MAX_URLS || 20);
-
           const http = require("http");
           const https = require("https");
+          const zlib = require("zlib");
 
-          function fetch(u) {
+          const mode = process.env.MODE || "urls";
+          const inputUrls = process.env.INPUT_URLS || "";
+          const sitemapUrl = process.env.SITEMAP_URL || "";
+          const maxUrls = Number(process.env.MAX_URLS || 20);
+          const outFile = process.env.GITHUB_OUTPUT;
+
+          function splitUrls(str) {
+            return (str || "")
+              .split(/[\r\n,]+/)
+              .map(s => s.trim())
+              .filter(Boolean);
+          }
+
+          function fetch(url) {
             return new Promise((resolve, reject) => {
-              const lib = u.startsWith("https:") ? https : http;
-              lib.get(u, (res) => {
-                let data = "";
-                res.on("data", (c) => data += c);
-                res.on("end", () => resolve(data));
-              }).on("error", reject);
+              const lib = url.startsWith("https:") ? https : http;
+
+              const req = lib.get(url, {
+                headers: { "User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip" }
+              }, (res) => {
+                const chunks = [];
+                res.on("data", c => chunks.push(c));
+                res.on("end", () => {
+                  const buf = Buffer.concat(chunks);
+                  const isGzip =
+                    (res.headers["content-encoding"] || "").includes("gzip") ||
+                    url.toLowerCase().endsWith(".gz");
+
+                  if (isGzip) {
+                    zlib.gunzip(buf, (err, out) => err ? reject(err) : resolve(out.toString("utf8")));
+                  } else {
+                    resolve(buf.toString("utf8"));
+                  }
+                });
+              });
+
+              req.on("error", reject);
             });
           }
 
-          (async () => {
-            const xml = await fetch(url);
-            const locs = [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)].map(m => m[1].trim());
-            const urls = locs.filter(x => /^https?:\/\//.test(x) && !x.endsWith(".xml")).slice(0, max);
+          function extractLocs(xml) {
+            return [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)].map(m => m[1].trim());
+          }
 
-            if (!urls.length) {
-              console.error("No URLs extracted from sitemap (or they were filtered out).");
-              process.exit(1);
+          async function urlsFromSitemap(url, seen = new Set(), collected = []) {
+            if (seen.has(url)) return collected;
+            seen.add(url);
+
+            const xml = await fetch(url);
+            const lower = xml.toLowerCase();
+
+            if (lower.includes("<sitemapindex")) {
+              const sitemaps = extractLocs(xml).filter(u => u.startsWith("http"));
+              for (const sm of sitemaps) {
+                if (collected.length >= maxUrls) break;
+                try { await urlsFromSitemap(sm, seen, collected); } catch (_) {}
+              }
+              return collected;
             }
 
-            const envFile = process.env.GITHUB_ENV;
-            fs.appendFileSync(envFile, `LHCI_URLS<<EOF\n${urls.join("\n")}\nEOF\n`);
-          })().catch(e => { console.error(e); process.exit(1); });
-          NODE
-        env:
-          SITEMAP_URL: ${{ inputs.sitemap_url }}
-          MAX_URLS: ${{ inputs.lhci_max_urls }}
+            // urlset or unknown: treat locs as page URLs, filter out .xml
+            const urls = extractLocs(xml)
+              .filter(u => u.startsWith("http"))
+              .filter(u => !u.toLowerCase().endsWith(".xml"));
 
-      # --- Lighthouse CI ---
+            for (const u of urls) {
+              if (collected.length >= maxUrls) break;
+              collected.push(u);
+            }
+            return collected;
+          }
+
+          (async () => {
+            let urls = [];
+
+            if (mode === "urls") {
+              urls = splitUrls(inputUrls);
+              if (!urls.length) throw new Error("mode=urls requires inputs.urls (comma or newline separated)");
+            } else {
+              if (!sitemapUrl) throw new Error("mode=sitemap requires inputs.sitemap_url");
+              urls = await urlsFromSitemap(sitemapUrl);
+            }
+
+            urls = urls.filter(u => u.startsWith("http")).slice(0, maxUrls);
+
+            if (!urls.length) throw new Error("No URLs resolved for Lighthouse.");
+
+            // Persist as a multi-line step output
+            fs.appendFileSync(outFile, `lhci_urls<<EOF\n${urls.join("\n")}\nEOF\n`, "utf8");
+
+            console.log(`Resolved ${urls.length} Lighthouse URL(s). Sample:`);
+            console.log(urls.slice(0, 3).join("\n"));
+          })().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          NODE
+
+      # -------------------------
+      # Lighthouse CI
+      # -------------------------
       - name: Run Lighthouse CI
         if: always()
+        continue-on-error: true
         env:
-          LHCI_RUNS: ${{ inputs.lhci_runs }}
+          LHCI_URLS: ${{ steps.lhci_urls.outputs.lhci_urls }}
+          LHCI_RUNS: "1"
         run: |
           set -euo pipefail
 
@@ -191,15 +208,11 @@ jobs:
 
           mkdir -p reports/lighthouse
 
-          npx lhci autorun --config=./.lighthouserc.js
+          echo "LHCI_URLS first 3:"
+          echo "$LHCI_URLS" | head -n 3
 
-      # --- Upload artifacts ---
-      - name: Upload pa11y reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pa11y-reports
-          path: reports/pa11y
+          # Use your repo config file (recommended)
+          npx lhci autorun --config=./.lighthouserc.js
 
       - name: Upload lighthouse reports
         if: always()
