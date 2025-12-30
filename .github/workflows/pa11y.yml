@@ -64,7 +64,7 @@ jobs:
               exit 1
             fi
 
-            CMD=(npx pa11y-ci -c .pa11yci.cjs --sitemap "${{ inputs.sitemap_url }}")
+            CMD=(npx pa11y-ci --config .pa11yci.js --sitemap "${{ inputs.sitemap_url }}")
 
             if [ -n "${{ inputs.sitemap_find }}" ]; then
               CMD+=(--sitemap-find "${{ inputs.sitemap_find }}")
@@ -83,7 +83,7 @@ jobs:
               exit 1
             fi
 
-            npx pa11y-ci -c .pa11yci.cjs
+            npx pa11y-ci --config .pa11yci.js
           fi
 
       # Always upload reports, even if pa11y-ci fails the job due to violations
