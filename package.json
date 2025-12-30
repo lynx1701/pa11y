@@ -4,6 +4,7 @@
     "a11y:sitemap": "pa11y-ci -c .pa11yci.cjs --sitemap"
   },
   "devDependencies": {
+    "@lhci/cli": "^0.15.1",
     "pa11y-ci": "^4.0.1",
     "pa11y-ci-reporter-html": "^8.0.1",
     "start-server-and-test": "^2.1.3",

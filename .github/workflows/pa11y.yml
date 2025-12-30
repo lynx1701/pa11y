@@ -212,7 +212,8 @@ jobs:
           echo "$LHCI_URLS" | head -n 3
 
           # Use your repo config file (recommended)
-          npx lhci autorun --config=./.lighthouserc.js
+          npx --no-install lhci --version
+          npx --no-install lhci autorun --config=./.lighthouserc.js
 
       - name: Upload lighthouse reports
         if: always()
