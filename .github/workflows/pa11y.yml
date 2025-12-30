@@ -1,0 +1,95 @@
+name: A11y (Pa11y)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode: urls (newline-separated) or sitemap"
+        type: choice
+        required: true
+        default: urls
+        options:
+          - urls
+          - sitemap
+      urls:
+        description: "URLs (newline-separated). Used when mode=urls"
+        type: string
+        required: false
+      sitemap_url:
+        description: "Sitemap URL (https://.../sitemap.xml). Used when mode=sitemap"
+        type: string
+        required: false
+      sitemap_find:
+        description: "Optional: string to find in sitemap URLs"
+        type: string
+        required: false
+      sitemap_replace:
+        description: "Optional: replacement string for sitemap URLs"
+        type: string
+        required: false
+      sitemap_exclude:
+        description: "Optional: regex/glob-ish exclude (pa11y-ci flag value)"
+        type: string
+        required: false
+
+jobs:
+  pa11y:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # Best practice: add pa11y-ci + reporter to devDependencies and use npm ci
+      # If you don't want to commit deps, replace `npm ci` with `npm i --no-save ...`
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Pa11y CI
+        env:
+          PA11Y_URLS: ${{ inputs.urls }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports/pa11y/html
+
+          if [ "${{ inputs.mode }}" = "sitemap" ]; then
+            if [ -z "${{ inputs.sitemap_url }}" ]; then
+              echo "mode=sitemap requires inputs.sitemap_url"
+              exit 1
+            fi
+
+            CMD=(npx pa11y-ci -c .pa11yci.cjs --sitemap "${{ inputs.sitemap_url }}")
+
+            if [ -n "${{ inputs.sitemap_find }}" ]; then
+              CMD+=(--sitemap-find "${{ inputs.sitemap_find }}")
+            fi
+            if [ -n "${{ inputs.sitemap_replace }}" ]; then
+              CMD+=(--sitemap-replace "${{ inputs.sitemap_replace }}")
+            fi
+            if [ -n "${{ inputs.sitemap_exclude }}" ]; then
+              CMD+=(--sitemap-exclude "${{ inputs.sitemap_exclude }}")
+            fi
+
+            "${CMD[@]}"
+          else
+            if [ -z "${{ inputs.urls }}" ]; then
+              echo "mode=urls requires inputs.urls (newline-separated)"
+              exit 1
+            fi
+
+            npx pa11y-ci -c .pa11yci.cjs
+          fi
+
+      # Always upload reports, even if pa11y-ci fails the job due to violations
+      - name: Upload pa11y reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pa11y-reports
+          path: reports/pa11y

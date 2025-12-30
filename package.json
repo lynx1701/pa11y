@@ -1,7 +1,7 @@
 {
   "scripts": {
-    "test:a11y": "pa11y-ci -c .pa11yci.json",
-    "run": "npm run start"
+    "a11y:urls": "pa11y-ci -c .pa11yci.cjs",
+    "a11y:sitemap": "pa11y-ci -c .pa11yci.cjs --sitemap"
   },
   "devDependencies": {
     "pa11y-ci": "^4.0.1",
